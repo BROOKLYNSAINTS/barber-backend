@@ -1,20 +1,9 @@
 // api/sms-reply.js
 
-// ---- HARD ENV CHECKS ----
-if (!process.env.FIREBASE_PROJECT_ID) {
-  throw new Error("MISSING_FIREBASE_PROJECT_ID");
-}
-if (!process.env.FIREBASE_CLIENT_EMAIL) {
-  throw new Error("MISSING_FIREBASE_CLIENT_EMAIL");
-}
-if (!process.env.FIREBASE_PRIVATE_KEY) {
-  throw new Error("MISSING_FIREBASE_PRIVATE_KEY");
-}
-
-// ---- FIREBASE ADMIN ----
 import { initializeApp, getApps, cert } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
 
+// ---- Firebase Admin Init ----
 if (!getApps().length) {
   initializeApp({
     credential: cert({
@@ -27,7 +16,7 @@ if (!getApps().length) {
 
 const db = getFirestore();
 
-// ---- HANDLER ----
+// ---- Handler ----
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).end();
@@ -41,18 +30,11 @@ export default async function handler(req, res) {
       return res.status(400).send("Invalid request");
     }
 
-    // REQUIRES COMPOSITE INDEX:
-    // customerPhone ASC
-    // status ASC
-    // createdAt DESC
-    // __name__ ASC
-    // scope: Collection (appointments)
+    // 🔴 NO orderBy → NO composite index needed
     const snapshot = await db
       .collection("appointments")
       .where("customerPhone", "==", from)
       .where("status", "==", "scheduled")
-      .orderBy("createdAt", "desc")
-      .orderBy("__name__")
       .limit(1)
       .get();
 
@@ -95,12 +77,12 @@ export default async function handler(req, res) {
       "Please reply YES to confirm or NO to cancel your appointment."
     );
   } catch (err) {
-    console.error(err);
+    console.error("SMS WEBHOOK ERROR:", err);
     return res.status(500).send("Server error");
   }
 }
 
-// ---- TWILIO XML ----
+// ---- Twilio XML ----
 function sendTwilioResponse(res, message) {
   res.setHeader("Content-Type", "text/xml");
   res.status(200).send(
