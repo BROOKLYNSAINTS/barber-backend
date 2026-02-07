@@ -1,17 +1,21 @@
 import twilio from "twilio";
-import { db } from "../firebase"; // adjust if needed
-import {
-  collection,
-  getDocs,
-  updateDoc,
-  doc
-} from "firebase/firestore";
+import { initializeApp, getApps } from "firebase-admin/app";
+import { getFirestore, Timestamp } from "firebase-admin/firestore";
 
+// ---------- Firebase Admin init ----------
+if (!getApps().length) {
+  initializeApp();
+}
+
+const db = getFirestore();
+
+// ---------- Twilio ----------
 const client = twilio(
   process.env.TWILIO_ACCOUNT_SID,
   process.env.TWILIO_AUTH_TOKEN
 );
 
+// ---------- Handler ----------
 export default async function handler(req, res) {
   if (req.method !== "GET") {
     return res.status(405).end();
@@ -20,42 +24,32 @@ export default async function handler(req, res) {
   try {
     const now = new Date();
 
-    /* =====================================================
-       PRODUCTION LOGIC (24-HOUR WINDOW) — COMMENTED OUT
-       =====================================================
+    /* ===========================
+       TEST WINDOW (ACTIVE)
+       =========================== */
+    const startWindow = new Date(now.getTime() + 1 * 60 * 1000); // +1 min
+    const endWindow   = new Date(now.getTime() + 3 * 60 * 1000); // +3 min
 
+    /* ===========================
+       PRODUCTION WINDOW (24h)
+       ===========================
     const startWindow = new Date(now.getTime() + 23.75 * 60 * 60 * 1000);
     const endWindow   = new Date(now.getTime() + 24.25 * 60 * 60 * 1000);
+    =========================== */
 
-    ===================================================== */
-
-    /* =====================================================
-       TEST LOGIC (2-MINUTE WINDOW) — ACTIVE
-       ===================================================== */
-
-    const startWindow = new Date(now.getTime() + 1 * 60 * 1000); // +1 minute
-    const endWindow   = new Date(now.getTime() + 3 * 60 * 1000); // +3 minutes
-
-    /* ===================================================== */
-
-    const snapshot = await getDocs(collection(db, "appointments"));
+    const snapshot = await db
+      .collection("appointments")
+      .where("status", "==", "scheduled")
+      .where("reminderSent", "!=", true)
+      .get();
 
     let sent = 0;
 
-    for (const snap of snapshot.docs) {
-      const appt = snap.data();
+    for (const docSnap of snapshot.docs) {
+      const appt = docSnap.data();
 
-      // Skip anything not eligible
-      if (
-        appt.status !== "scheduled" ||
-        appt.reminderSent === true ||
-        !appt.start ||
-        !appt.customerPhone
-      ) {
-        continue;
-      }
+      if (!appt.start || !appt.customerPhone) continue;
 
-      // Build Date from "2025-12-17T01:00"
       const appointmentTime = new Date(appt.start);
 
       if (
@@ -79,8 +73,9 @@ Reply NO to cancel`;
           body: message
         });
 
-        await updateDoc(doc(db, "appointments", snap.id), {
-          reminderSent: true
+        await docSnap.ref.update({
+          reminderSent: true,
+          reminderSentAt: Timestamp.now()
         });
 
         sent++;
@@ -92,7 +87,7 @@ Reply NO to cancel`;
       remindersSent: sent
     });
   } catch (err) {
-    console.error("Error sending reminders:", err);
+    console.error("REMINDER CRON ERROR:", err);
     return res.status(500).json({ error: err.message });
   }
 }
