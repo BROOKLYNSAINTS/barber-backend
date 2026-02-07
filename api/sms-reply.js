@@ -41,6 +41,12 @@ export default async function handler(req, res) {
       return res.status(400).send("Invalid request");
     }
 
+    // REQUIRES COMPOSITE INDEX:
+    // customerPhone ASC
+    // status ASC
+    // createdAt DESC
+    // __name__ ASC
+    // scope: Collection (appointments)
     const snapshot = await db
       .collection("appointments")
       .where("customerPhone", "==", from)
