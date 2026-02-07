@@ -46,6 +46,7 @@ export default async function handler(req, res) {
       .where("customerPhone", "==", from)
       .where("status", "==", "scheduled")
       .orderBy("createdAt", "desc")
+      .orderBy("__name__")
       .limit(1)
       .get();
 
