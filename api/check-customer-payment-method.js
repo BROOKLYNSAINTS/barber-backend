@@ -9,26 +9,58 @@ export default async function handler(req, res) {
 
   try {
     const { customerId, barberStripeAccountId } = req.body;
+    const normalizedAccountId =
+      typeof barberStripeAccountId === 'string' ? barberStripeAccountId.trim() : '';
 
-    console.log('🔍 Checking payment method for customer:', customerId, 'in account:', barberStripeAccountId);
+    if (!customerId) {
+      return res.status(400).json({ error: 'customerId is required' });
+    }
+    if (!normalizedAccountId) {
+      return res.status(400).json({ error: 'barberStripeAccountId is required' });
+    }
+    if (!normalizedAccountId.startsWith('acct_')) {
+      return res.status(400).json({ error: 'Invalid barberStripeAccountId' });
+    }
 
-    // Search for customer in the barber's Connect account
-    const customers = await stripe.customers.list(
-      {
-        limit: 1,
-        metadata: { appCustomerId: customerId },
-      },
-      {
-        stripeAccount: barberStripeAccountId,
+    console.log('🔍 Checking payment method for customer:', customerId, 'in account:', normalizedAccountId);
+
+    let customer = null;
+
+    // If a Stripe customer id is provided, retrieve directly.
+    if (typeof customerId === 'string' && customerId.startsWith('cus_')) {
+      try {
+        customer = await stripe.customers.retrieve(
+          customerId,
+          {},
+          { stripeAccount: normalizedAccountId }
+        );
+      } catch (error) {
+        const missingCustomer =
+          error?.type === 'StripeInvalidRequestError' && error?.code === 'resource_missing';
+        if (!missingCustomer) {
+          throw error;
+        }
       }
-    );
+    }
 
-    if (customers.data.length === 0) {
+    // Otherwise list and filter metadata client-side.
+    if (!customer) {
+      const customers = await stripe.customers.list(
+        {
+          limit: 100,
+        },
+        {
+          stripeAccount: normalizedAccountId,
+        }
+      );
+      customer = customers.data.find((c) => c.metadata?.appCustomerId === customerId) || null;
+    }
+
+    if (!customer || customer.deleted) {
       console.log('ℹ️ Customer not found in barber account');
       return res.status(200).json({ hasPaymentMethod: false });
     }
 
-    const customer = customers.data[0];
     console.log('✅ Customer found:', customer.id);
 
     // Check if customer has saved payment methods
@@ -38,7 +70,7 @@ export default async function handler(req, res) {
         type: 'card',
       },
       {
-        stripeAccount: barberStripeAccountId,
+        stripeAccount: normalizedAccountId,
       }
     );
 

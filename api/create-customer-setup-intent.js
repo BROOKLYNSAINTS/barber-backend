@@ -1,6 +1,11 @@
-import Stripe from 'stripe';
+// api/create-customer-setup-intent.js
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+import Stripe from 'stripe';
+import { getAuthUser } from './_auth.js';
+
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
+  apiVersion: '2023-10-16',
+});
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
@@ -8,73 +13,58 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { customerId, customerName, customerEmail, barberStripeAccountId } = req.body;
-
-    console.log('🔧 Creating customer and setup intent for:', customerId, 'in account:', barberStripeAccountId);
-
-    // Step 1: Create or get customer in barber's Connect account
-    let customer;
-    
-    // First check if customer already exists
-    const existingCustomers = await stripe.customers.list(
-      {
-        limit: 1,
-        metadata: { appCustomerId: customerId },
-      },
-      {
-        stripeAccount: barberStripeAccountId,
-      }
-    );
-
-    if (existingCustomers.data.length > 0) {
-      customer = existingCustomers.data[0];
-      console.log('✅ Using existing customer:', customer.id);
-    } else {
-      // Create new customer in barber's account
-      customer = await stripe.customers.create(
-        {
-          name: customerName,
-          email: customerEmail,
-          metadata: {
-            appCustomerId: customerId,
-          },
-        },
-        {
-          stripeAccount: barberStripeAccountId,
-        }
-      );
-      console.log('✅ Created new customer:', customer.id);
+    const user = await getAuthUser(req);
+    if (!user) {
+      return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    // Step 2: Create Setup Intent to save payment method
-    const setupIntent = await stripe.setupIntents.create(
-      {
-        customer: customer.id,
-        payment_method_types: ['card'],
-        usage: 'off_session', // For future payments
-        metadata: {
-          appCustomerId: customerId,
-          barberStripeAccountId: barberStripeAccountId,
-        },
-      },
-      {
-        stripeAccount: barberStripeAccountId,
-      }
+    const { customerEmail, customerName } = req.body;
+
+    if (!customerEmail) {
+      return res.status(400).json({ error: 'customerEmail required' });
+    }
+
+    console.log('🔧 Creating customer + SetupIntent (platform level)');
+
+    // 1️⃣ Find or create Stripe customer (PLATFORM)
+    let customer;
+
+    const existing = await stripe.customers.list({
+      email: customerEmail,
+      limit: 1,
+    });
+
+    if (existing.data.length > 0) {
+      customer = existing.data[0];
+    } else {
+      customer = await stripe.customers.create({
+        email: customerEmail,
+        name: customerName || 'Customer',
+      });
+    }
+
+    // 2️⃣ Create ephemeral key (PLATFORM)
+    const ephemeralKey = await stripe.ephemeralKeys.create(
+      { customer: customer.id },
+      { apiVersion: '2023-10-16' }
     );
 
-    console.log('✅ Setup intent created:', setupIntent.id);
+    // 3️⃣ Create SetupIntent (PLATFORM — NO CONNECT)
+    const setupIntent = await stripe.setupIntents.create({
+      customer: customer.id,
+      payment_method_types: ['card'],
+    });
 
     return res.status(200).json({
-      setupIntentId: setupIntent.id,
-      clientSecret: setupIntent.client_secret,
-      customerStripeId: customer.id,
+      setupIntentClientSecret: setupIntent.client_secret,
+      customer: customer.id,
+      ephemeralKey: ephemeralKey.secret,
     });
 
   } catch (error) {
     console.error('❌ Error creating setup intent:', error);
-    return res.status(500).json({ 
-      error: 'Failed to create setup intent',
-      details: error.message 
+    return res.status(500).json({
+      error: error.message || 'Internal server error',
     });
   }
 }

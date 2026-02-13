@@ -3,15 +3,46 @@
 import { initializeApp, getApps, cert } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
 
-// Initialize Firebase Admin if not already initialized
-if (!getApps().length) {
-  initializeApp({
-    credential: cert({
-      projectId: process.env.FIREBASE_ADMIN_PROJECT_ID,
-      clientEmail: process.env.FIREBASE_ADMIN_CLIENT_EMAIL,
-      privateKey: process.env.FIREBASE_ADMIN_PRIVATE_KEY?.replace(/\\n/g, '\n'),
-    })
-  });
+let authClient = null;
+let authInitAttempted = false;
+
+function getFirebaseAuthClient() {
+  if (authClient) return authClient;
+  if (authInitAttempted) return null;
+  authInitAttempted = true;
+
+  try {
+    if (!getApps().length) {
+      const projectId =
+        process.env.FIREBASE_ADMIN_PROJECT_ID || process.env.FIREBASE_PROJECT_ID;
+      const clientEmail =
+        process.env.FIREBASE_ADMIN_CLIENT_EMAIL || process.env.FIREBASE_CLIENT_EMAIL;
+      const rawPrivateKey =
+        process.env.FIREBASE_ADMIN_PRIVATE_KEY || process.env.FIREBASE_PRIVATE_KEY;
+      const privateKey = typeof rawPrivateKey === 'string'
+        ? rawPrivateKey.replace(/\\n/g, '\n')
+        : undefined;
+
+      if (!projectId || !clientEmail || !privateKey) {
+        console.error('❌ Firebase admin credentials are not fully configured');
+        return null;
+      }
+
+      initializeApp({
+        credential: cert({
+          projectId,
+          clientEmail,
+          privateKey,
+        }),
+      });
+    }
+
+    authClient = getAuth();
+    return authClient;
+  } catch (error) {
+    console.error('❌ Firebase admin init failed:', error?.message || error);
+    return null;
+  }
 }
 
 /**
@@ -20,6 +51,11 @@ if (!getApps().length) {
  */
 export async function verifyAuthToken(req) {
   try {
+    const auth = getFirebaseAuthClient();
+    if (!auth) {
+      return null;
+    }
+
     const authHeader = req.headers.authorization || req.headers.Authorization;
     
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -34,7 +70,7 @@ export async function verifyAuthToken(req) {
       return null;
     }
     
-    const decodedToken = await getAuth().verifyIdToken(token);
+    const decodedToken = await auth.verifyIdToken(token);
     console.log('✅ Auth verified for user:', decodedToken.uid);
     return decodedToken;
     
