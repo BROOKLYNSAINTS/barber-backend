@@ -1,8 +1,6 @@
 import Stripe from "stripe";
 import admin from "firebase-admin";
-import { buffer } from "micro";
-
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+import { adminDb } from "./_firebaseAdmin.js";
 
 export const config = {
   api: {
@@ -10,135 +8,84 @@ export const config = {
   },
 };
 
-// Firebase Admin init
-if (!admin.apps.length) {
-  admin.initializeApp();
-}
-
-const db = admin.firestore();
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
+  apiVersion: "2023-10-16",
+});
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
-    return res.status(405).send("Method not allowed");
+    return res.status(405).send("Method Not Allowed");
   }
 
-  const buf = await buffer(req);
   const sig = req.headers["stripe-signature"];
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+
+  if (!webhookSecret) {
+    console.error("Webhook secret missing in environment");
+    return res.status(500).send("Webhook secret not configured");
+  }
 
   let event;
 
   try {
-    event = stripe.webhooks.constructEvent(
-      buf.toString(),
-      sig,
-      process.env.STRIPE_WEBHOOK_SECRET
-    );
+    const rawBody = await getRawBody(req);
+    event = stripe.webhooks.constructEvent(rawBody, sig, webhookSecret);
   } catch (err) {
-    console.error("❌ Webhook signature failed:", err.message);
+    console.error("❌ Webhook signature verification failed:", err.message);
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
-  try {
-    switch (event.type) {
-      /**
-       * ----------------------------------
-       * SetupIntent succeeded
-       * Save card for no-show protection
-       * ----------------------------------
-       */
-      case "setup_intent.succeeded": {
-        const setupIntent = event.data.object;
+  if (event.type === "payment_intent.succeeded") {
+    const paymentIntent = event.data.object;
 
-        const stripeCustomerId = setupIntent.customer;
-        const paymentMethodId = setupIntent.payment_method;
+    const appointmentId = paymentIntent.metadata?.appointmentId;
+    const paymentCategory =
+      paymentIntent.metadata?.paymentCategory || "service";
 
-        console.log("✅ setup_intent.succeeded", {
-          stripeCustomerId,
-          paymentMethodId,
-        });
-
-        if (!stripeCustomerId || !paymentMethodId) {
-          console.warn("⚠️ Missing customer or payment method");
-          break;
-        }
-
-        /**
-         * 🔐 Ensure payment method is attached
-         */
-        try {
-          await stripe.paymentMethods.attach(paymentMethodId, {
-            customer: stripeCustomerId,
-          });
-        } catch (err) {
-          // Ignore "already attached" errors
-          const msg = String(err?.message || "");
-          if (!msg.toLowerCase().includes("already")) {
-            throw err;
-          }
-        }
-
-        /**
-         * ⭐ Set default payment method
-         */
-        await stripe.customers.update(stripeCustomerId, {
-          invoice_settings: {
-            default_payment_method: paymentMethodId,
-          },
-        });
-
-        /**
-         * 🔎 Find user by stripeCustomerId
-         */
-        const userSnap = await db
-          .collection("users")
-          .where("stripeCustomerId", "==", stripeCustomerId)
-          .limit(1)
-          .get();
-
-        if (userSnap.empty) {
-          console.warn(
-            "⚠️ No user found for stripeCustomerId:",
-            stripeCustomerId
-          );
-          break;
-        }
-
-        const userDoc = userSnap.docs[0];
-
-        /**
-         * 💾 Persist on user
-         */
-        await userDoc.ref.update({
-          defaultPaymentMethodId: paymentMethodId,
-          paymentMethodUpdatedAt:
-            admin.firestore.FieldValue.serverTimestamp(),
-        });
-
-        console.log(
-          "💳 Default payment method saved for user:",
-          userDoc.id
-        );
-        break;
-      }
-
-      /**
-       * Existing handlers
-       */
-      case "payment_intent.succeeded":
-        console.log("✅ Payment succeeded:", event.data.object.id);
-        break;
-
-      case "payment_intent.payment_failed":
-        console.log("❌ Payment failed:", event.data.object.id);
-        break;
-
-      default:
-        console.log("Unhandled event type:", event.type);
+    if (!appointmentId) {
+      console.warn(
+        "payment_intent.succeeded missing appointmentId:",
+        paymentIntent.id
+      );
+      return res.status(200).json({ received: true, skipped: true });
     }
 
-    return res.json({ received: true });
-  } catch (err) {
-    console.error("❌ Webhook processing error:", err);
-    return res.status(500).json({ error: "Webhook handler failed" });
+    if (paymentCategory === "tip") {
+      await adminDb.collection("appointments").doc(appointmentId).update({
+        tipStatus: "paid",
+        tipPaidAt: admin.firestore.FieldValue.serverTimestamp(),
+        tipAmountPaid: admin.firestore.FieldValue.increment(
+          paymentIntent.amount / 100
+        ),
+        tipPaymentIntentId: paymentIntent.id,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+      console.log("✅ Appointment tip updated:", appointmentId);
+    } else {
+      await adminDb.collection("appointments").doc(appointmentId).update({
+        paymentStatus: "paid",
+        paidAt: admin.firestore.FieldValue.serverTimestamp(),
+        amountPaid: paymentIntent.amount / 100,
+        paymentIntentId: paymentIntent.id,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+      console.log("✅ Appointment payment updated:", appointmentId);
+    }
   }
+
+  res.status(200).json({ received: true });
+}
+
+/* ===========================================
+   RAW BODY READER (CRITICAL PART)
+=========================================== */
+function getRawBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("error", reject);
+  });
 }

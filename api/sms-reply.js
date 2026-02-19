@@ -1,20 +1,7 @@
 // api/sms-reply.js
 
-import { initializeApp, getApps, cert } from "firebase-admin/app";
-import { getFirestore } from "firebase-admin/firestore";
-
-// ---- Firebase Admin Init ----
-if (!getApps().length) {
-  initializeApp({
-    credential: cert({
-      projectId: process.env.FIREBASE_PROJECT_ID,
-      clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-      privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n"),
-    }),
-  });
-}
-
-const db = getFirestore();
+import admin from "firebase-admin";
+import { adminDb } from "./_firebaseAdmin.js";
 
 // ---- Handler ----
 export default async function handler(req, res) {
@@ -30,8 +17,7 @@ export default async function handler(req, res) {
       return res.status(400).send("Invalid request");
     }
 
-    // 🔴 NO orderBy → NO composite index needed
-    const snapshot = await db
+    const snapshot = await adminDb
       .collection("appointments")
       .where("customerPhone", "==", from)
       .where("status", "==", "scheduled")
@@ -46,12 +32,12 @@ export default async function handler(req, res) {
     }
 
     const docSnap = snapshot.docs[0];
-    const apptRef = db.collection("appointments").doc(docSnap.id);
+    const apptRef = adminDb.collection("appointments").doc(docSnap.id);
 
     if (body === "YES") {
       await apptRef.update({
         status: "confirmed",
-        updatedAt: new Date(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       });
 
       return sendTwilioResponse(
@@ -63,7 +49,7 @@ export default async function handler(req, res) {
     if (body === "NO") {
       await apptRef.update({
         status: "cancelled",
-        updatedAt: new Date(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       });
 
       return sendTwilioResponse(

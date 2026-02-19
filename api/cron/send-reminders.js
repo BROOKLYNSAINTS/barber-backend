@@ -1,13 +1,6 @@
 import twilio from "twilio";
-import { initializeApp, getApps } from "firebase-admin/app";
-import { getFirestore, Timestamp } from "firebase-admin/firestore";
-
-// ---------- Firebase Admin init ----------
-if (!getApps().length) {
-  initializeApp();
-}
-
-const db = getFirestore();
+import admin from "firebase-admin";
+import { adminDb } from "../_firebaseAdmin.js";
 
 // ---------- Twilio ----------
 const client = twilio(
@@ -28,16 +21,9 @@ export default async function handler(req, res) {
        TEST WINDOW (ACTIVE)
        =========================== */
     const startWindow = new Date(now.getTime() + 1 * 60 * 1000); // +1 min
-    const endWindow   = new Date(now.getTime() + 3 * 60 * 1000); // +3 min
+    const endWindow = new Date(now.getTime() + 3 * 60 * 1000); // +3 min
 
-    /* ===========================
-       PRODUCTION WINDOW (24h)
-       ===========================
-    const startWindow = new Date(now.getTime() + 23.75 * 60 * 60 * 1000);
-    const endWindow   = new Date(now.getTime() + 24.25 * 60 * 60 * 1000);
-    =========================== */
-
-    const snapshot = await db
+    const snapshot = await adminDb
       .collection("appointments")
       .where("status", "==", "scheduled")
       .where("reminderSent", "!=", true)
@@ -58,7 +44,7 @@ export default async function handler(req, res) {
       ) {
         const timeString = appointmentTime.toLocaleTimeString("en-US", {
           hour: "numeric",
-          minute: "2-digit"
+          minute: "2-digit",
         });
 
         const message = `Hi ${appt.customerName} 👋
@@ -70,12 +56,12 @@ Reply NO to cancel`;
         await client.messages.create({
           to: appt.customerPhone,
           from: process.env.TWILIO_PHONE_NUMBER,
-          body: message
+          body: message,
         });
 
         await docSnap.ref.update({
           reminderSent: true,
-          reminderSentAt: Timestamp.now()
+          reminderSentAt: admin.firestore.FieldValue.serverTimestamp(),
         });
 
         sent++;
@@ -84,7 +70,7 @@ Reply NO to cancel`;
 
     return res.status(200).json({
       success: true,
-      remindersSent: sent
+      remindersSent: sent,
     });
   } catch (err) {
     console.error("REMINDER CRON ERROR:", err);

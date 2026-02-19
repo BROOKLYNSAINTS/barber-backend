@@ -1,53 +1,13 @@
 // api/_auth.js
-// Firebase Admin authentication helper for Vercel
+// Uses Firebase Admin from _firebaseAdmin.js
 
-import { initializeApp, getApps, cert } from 'firebase-admin/app';
-import { getAuth } from 'firebase-admin/auth';
-
-let firebaseAuth = null;
-
-/**
- * Initialize Firebase Admin safely (once)
- */
-function getFirebaseAuth() {
-  if (firebaseAuth) return firebaseAuth;
-
-  if (!getApps().length) {
-    const projectId = process.env.FIREBASE_ADMIN_PROJECT_ID;
-    const clientEmail = process.env.FIREBASE_ADMIN_CLIENT_EMAIL;
-    const rawPrivateKey = process.env.FIREBASE_ADMIN_PRIVATE_KEY;
-
-    const privateKey =
-      typeof rawPrivateKey === 'string'
-        ? rawPrivateKey.replace(/\\n/g, '\n')
-        : undefined;
-
-    if (!projectId || !clientEmail || !privateKey) {
-      console.error('❌ Firebase admin credentials missing');
-      return null;
-    }
-
-    initializeApp({
-      credential: cert({
-        projectId,
-        clientEmail,
-        privateKey,
-      }),
-    });
-  }
-
-  firebaseAuth = getAuth();
-  return firebaseAuth;
-}
+import { adminAuth } from './_firebaseAdmin.js';
 
 /**
  * Verify Firebase ID token from Authorization header
  */
 export async function verifyAuthToken(req) {
   try {
-    const auth = getFirebaseAuth();
-    if (!auth) return null;
-
     const authHeader =
       req.headers.authorization || req.headers.Authorization;
 
@@ -58,7 +18,7 @@ export async function verifyAuthToken(req) {
     const token = authHeader.split('Bearer ')[1];
     if (!token) return null;
 
-    const decoded = await auth.verifyIdToken(token);
+    const decoded = await adminAuth.verifyIdToken(token);
     return decoded;
   } catch (error) {
     console.error(

@@ -1,42 +1,39 @@
-import Stripe from 'stripe';
-import admin from 'firebase-admin';
+import Stripe from "stripe";
+import admin, { adminDb } from "../_firebaseAdmin.js";
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
-
-// Firebase Admin (safe for serverless)
-if (!admin.apps.length) {
-  admin.initializeApp();
-}
-
-const db = admin.firestore();
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
+  apiVersion: "2023-10-16",
+});
 
 export default async function handler(req, res) {
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed' });
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "Method not allowed" });
   }
 
   try {
     /* ----------------------------------
      * Auth (BARBER)
      * ---------------------------------- */
-    const authHeader = req.headers.authorization || '';
-    const token = authHeader.replace('Bearer ', '');
-    if (!token) return res.status(401).json({ error: 'Unauthorized' });
+    const authHeader = req.headers.authorization || "";
+    const token = authHeader.replace("Bearer ", "");
+    if (!token) return res.status(401).json({ error: "Unauthorized" });
 
     const decoded = await admin.auth().verifyIdToken(token);
     const barberUserId = decoded.uid;
 
     const { appointmentId } = req.body;
     if (!appointmentId) {
-      return res.status(400).json({ error: 'Missing appointmentId' });
+      return res.status(400).json({ error: "Missing appointmentId" });
     }
 
-    const appointmentRef = db.collection('appointments').doc(appointmentId);
+    const appointmentRef = adminDb
+      .collection("appointments")
+      .doc(appointmentId);
 
-    const result = await db.runTransaction(async (tx) => {
+    const result = await adminDb.runTransaction(async (tx) => {
       const snap = await tx.get(appointmentRef);
       if (!snap.exists) {
-        throw new Error('Appointment not found');
+        throw new Error("Appointment not found");
       }
 
       const appt = snap.data();
@@ -45,10 +42,10 @@ export default async function handler(req, res) {
        * SAFETY CHECKS
        * ---------------------------------- */
       if (appt.barberId !== barberUserId) {
-        throw new Error('Not authorized');
+        throw new Error("Not authorized");
       }
 
-      if (appt.noShowProtection?.status === 'charged') {
+      if (appt.noShowProtection?.status === "charged") {
         return {
           alreadyCharged: true,
           amountCharged: appt.noShowProtection.amountCharged || 0,
@@ -59,11 +56,11 @@ export default async function handler(req, res) {
         !appt.customerStripeId ||
         !appt.customerStripePaymentMethodId
       ) {
-        throw new Error('Customer has no saved payment method');
+        throw new Error("Customer has no saved payment method");
       }
 
       if (!appt.barberStripeAccountId) {
-        throw new Error('Barber Stripe account not connected');
+        throw new Error("Barber Stripe account not connected");
       }
 
       /* ----------------------------------
@@ -72,7 +69,7 @@ export default async function handler(req, res) {
       const ns = appt.noShowProtection || {};
       let amountCents = 0;
 
-      if (ns.feeType === 'percent') {
+      if (ns.feeType === "percent") {
         amountCents = Math.round(
           ((appt.servicePrice || 0) * ns.feeAmount) / 100 * 100
         );
@@ -81,7 +78,7 @@ export default async function handler(req, res) {
       }
 
       if (amountCents <= 0) {
-        throw new Error('Invalid no-show fee');
+        throw new Error("Invalid no-show fee");
       }
 
       /* ----------------------------------
@@ -90,12 +87,12 @@ export default async function handler(req, res) {
       const paymentIntent = await stripe.paymentIntents.create(
         {
           amount: amountCents,
-          currency: 'usd',
+          currency: "usd",
           customer: appt.customerStripeId,
           payment_method: appt.customerStripePaymentMethodId,
           off_session: true,
           confirm: true,
-          description: `No-show fee – ${appt.serviceName}`,
+          description: `No-show fee – ${appt.serviceName || "Service"}`,
           metadata: {
             appointmentId,
             barberId: appt.barberId,
@@ -111,11 +108,11 @@ export default async function handler(req, res) {
        * FIRESTORE UPDATES
        * ---------------------------------- */
       tx.update(appointmentRef, {
-        status: 'no_show',
-        paymentStatus: 'charged',
+        status: "no_show",
+        paymentStatus: "charged",
         noShowProtection: {
           ...ns,
-          status: 'charged',
+          status: "charged",
           amountCharged: amountCents / 100,
           paymentIntentId: paymentIntent.id,
           chargedAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -125,7 +122,7 @@ export default async function handler(req, res) {
 
       // 📊 Recovered revenue (lifetime)
       tx.set(
-        db.collection('users').doc(appt.barberId),
+        adminDb.collection("users").doc(appt.barberId),
         {
           metrics: {
             recoveredRevenue:
@@ -143,9 +140,9 @@ export default async function handler(req, res) {
 
     return res.json({ success: true, ...result });
   } catch (err) {
-    console.error('❌ No-show charge failed:', err);
+    console.error("❌ No-show charge failed:", err);
     return res.status(400).json({
-      error: err.message || 'Charge failed',
+      error: err.message || "Charge failed",
     });
   }
 }

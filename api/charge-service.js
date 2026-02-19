@@ -1,5 +1,3 @@
-// api/create-payment-intent.js
-
 import Stripe from "stripe";
 import { adminDb } from "./_firebaseAdmin.js";
 
@@ -74,7 +72,7 @@ export default async function handler(req, res) {
 
   } catch (err) {
     return res.status(500).json({
-      error: err?.message || "Internal server error",
+      error: err.message,
     });
   }
 }

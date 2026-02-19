@@ -1,20 +1,27 @@
 // api/_firebaseAdmin.js
 import admin from 'firebase-admin';
 
-function getPrivateKey() {
-  // Vercel env vars often store \n literally
-  const key = process.env.FIREBASE_PRIVATE_KEY;
-  return key ? key.replace(/\\n/g, '\n') : undefined;
-}
-
 if (!admin.apps.length) {
-  admin.initializeApp({
-    credential: admin.credential.cert({
-      projectId: process.env.FIREBASE_PROJECT_ID,
-      clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-      privateKey: getPrivateKey(),
-    }),
-  });
+  const projectId = process.env.FIREBASE_ADMIN_PROJECT_ID;
+  const clientEmail = process.env.FIREBASE_ADMIN_CLIENT_EMAIL;
+  const rawPrivateKey = process.env.FIREBASE_ADMIN_PRIVATE_KEY;
+
+  const privateKey =
+    typeof rawPrivateKey === 'string'
+      ? rawPrivateKey.replace(/\\n/g, '\n')
+      : undefined;
+
+  if (!projectId || !clientEmail || !privateKey) {
+    console.error('❌ Firebase admin credentials missing');
+  } else {
+    admin.initializeApp({
+      credential: admin.credential.cert({
+        projectId,
+        clientEmail,
+        privateKey,
+      }),
+    });
+  }
 }
 
 export const adminDb = admin.firestore();

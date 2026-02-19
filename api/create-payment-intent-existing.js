@@ -27,6 +27,8 @@ export default async function handler(req, res) {
       amount,
       currency = 'usd',
       customer_id,
+      appointmentId,
+      appointment_id,
       customer_email,
       customer_name,
       service_name,
@@ -35,6 +37,10 @@ export default async function handler(req, res) {
       appointment_time,
       metadata
     } = req.body;
+
+    const resolvedAppointmentId = String(
+      appointmentId || appointment_id || metadata?.appointmentId || metadata?.appointment_id || ""
+    ).trim();
 
     // ✅ Validate required fields
     if (!amount) {
@@ -88,6 +94,12 @@ export default async function handler(req, res) {
       description: `${service_name} with ${barber_name} on ${appointment_date} at ${appointment_time}`,
       metadata: {
         ...metadata,
+        ...(resolvedAppointmentId
+          ? {
+              appointmentId: resolvedAppointmentId,
+              appointment_id: resolvedAppointmentId,
+            }
+          : {}),
         customerName: customer_name,
         customerEmail: customer_email,
         paymentType: 'existing_customer',
