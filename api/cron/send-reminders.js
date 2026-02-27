@@ -1,79 +1,95 @@
 import twilio from "twilio";
 import admin from "firebase-admin";
-import { adminDb } from "../_firebaseAdmin.js";
 
-// ---------- Twilio ----------
+/* ==============================
+   FIREBASE INIT
+============================== */
+
+if (!admin.apps.length) {
+  admin.initializeApp({
+    credential: admin.credential.cert({
+      projectId: process.env.FIREBASE_ADMIN_PROJECT_ID,
+      clientEmail: process.env.FIREBASE_ADMIN_CLIENT_EMAIL,
+      privateKey: process.env.FIREBASE_ADMIN_PRIVATE_KEY?.replace(/\\n/g, "\n"),
+    }),
+  });
+}
+
+const db = admin.firestore();
+
+/* ==============================
+   TWILIO INIT
+============================== */
+
 const client = twilio(
   process.env.TWILIO_ACCOUNT_SID,
   process.env.TWILIO_AUTH_TOKEN
 );
 
-// ---------- Handler ----------
+/* ==============================
+   CRON HANDLER
+============================== */
+
 export default async function handler(req, res) {
-  if (req.method !== "GET") {
-    return res.status(405).end();
-  }
-
   try {
+    console.log("🔔 Running send-reminders cron");
+
     const now = new Date();
+    const in15Minutes = new Date(now.getTime() + 15 * 60 * 1000);
 
-    /* ===========================
-       TEST WINDOW (ACTIVE)
-       =========================== */
-    const startWindow = new Date(now.getTime() + 1 * 60 * 1000); // +1 min
-    const endWindow = new Date(now.getTime() + 3 * 60 * 1000); // +3 min
+    let remindersSent = 0;
 
-    const snapshot = await adminDb
+    const snapshot = await db
       .collection("appointments")
-      .where("status", "==", "scheduled")
-      .where("reminderSent", "!=", true)
+      .where("status", "==", "confirmed")       // ✅ FIXED
+      .where("paymentStatus", "==", "paid")    // ✅ Only paid appointments
       .get();
 
-    let sent = 0;
+    console.log("📊 Appointments fetched:", snapshot.size);
 
-    for (const docSnap of snapshot.docs) {
-      const appt = docSnap.data();
+    for (const doc of snapshot.docs) {
+      const appt = doc.data();
 
-      if (!appt.start || !appt.customerPhone) continue;
+      if (appt.reminderSent === true) continue;
 
-      const appointmentTime = new Date(appt.start);
+      if (!appt.startTime) continue;
 
-      if (
-        appointmentTime >= startWindow &&
-        appointmentTime <= endWindow
-      ) {
-        const timeString = appointmentTime.toLocaleTimeString("en-US", {
-          hour: "numeric",
-          minute: "2-digit",
-        });
+      const appointmentTime =
+        appt.startTime?.toDate?.() ||
+        new Date(appt.startTime);
 
-        const message = `Hi ${appt.customerName} 👋
-Reminder: You have a ${appt.serviceName} scheduled at ${timeString} with ${appt.barberName}.
+      if (appointmentTime >= now && appointmentTime <= in15Minutes) {
 
-Reply YES to confirm
-Reply NO to cancel`;
+        if (!appt.customerPhone || !process.env.TWILIO_PHONE_NUMBER) {
+          console.log("⚠️ Missing phone number");
+          continue;
+        }
 
         await client.messages.create({
+          body: `Reminder: You have an appointment at ${appointmentTime.toLocaleTimeString()}`,
+          from: process.env.TWILIO_PHONE_NUMBER,  // ✅ safer than barberPhone
           to: appt.customerPhone,
-          from: process.env.TWILIO_PHONE_NUMBER,
-          body: message,
         });
 
-        await docSnap.ref.update({
+        await doc.ref.update({
           reminderSent: true,
           reminderSentAt: admin.firestore.FieldValue.serverTimestamp(),
         });
 
-        sent++;
+        remindersSent++;
+        console.log("✅ Reminder sent to:", appt.customerPhone);
       }
     }
 
+    console.log("🎯 Reminders sent:", remindersSent);
+
     return res.status(200).json({
       success: true,
-      remindersSent: sent,
+      remindersSent,
     });
+
   } catch (err) {
-    console.error("REMINDER CRON ERROR:", err);
+    console.error("❌ CRON ERROR:", err);
     return res.status(500).json({ error: err.message });
   }
 }
