@@ -1,9 +1,7 @@
 // api/connect-refresh.js
 import Stripe from "stripe";
-import { adminDb } from "./_firebaseAdmin.js";
+import { getAdminDb } from "./_firebaseAdmin.js";
 import { verifyAuthToken } from "./_auth.js";
-
-const db = adminDb;
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Credentials", true);
@@ -23,6 +21,9 @@ export default async function handler(req, res) {
   if (req.method === "OPTIONS") {
     return res.status(200).end();
   }
+
+  // ✅ FIX: db inside handler
+  const db = getAdminDb(req.headers.host);
 
   if (req.method === "GET") {
     try {
@@ -114,6 +115,8 @@ export default async function handler(req, res) {
         payoutsEnabled,
       });
     } catch (error) {
+      console.error("❌ CONNECT REFRESH ERROR:", error);
+
       return res.status(500).json({
         success: false,
         onboardingComplete: false,

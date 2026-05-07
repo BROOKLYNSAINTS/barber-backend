@@ -3,7 +3,7 @@
 import Stripe from "stripe";
 import admin from "firebase-admin";
 import { verifyAuthToken } from "./_auth.js";
-import { adminDb } from "./_firebaseAdmin.js";
+import { getAdminDb } from "./_firebaseAdmin.js";
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -19,12 +19,15 @@ export default async function handler(req, res) {
     return res.status(401).json({ error: "Unauthorized" });
   }
 
+  // ✅ FIX: db inside handler
+  const db = getAdminDb(req.headers.host);
+
   if (req.method === "GET") {
     return res.status(200).json({
       status: "Subscription API is running",
       timestamp: new Date().toISOString(),
       stripe_configured: !!process.env.STRIPE_SECRET_KEY,
-      firestore_configured: !!adminDb,
+      firestore_configured: !!db,
     });
   }
 
@@ -43,7 +46,6 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Missing required parameter: userId" });
     }
 
-    // ✅ Security: only allow creating subscription for the authenticated user
     if (user.uid && user.uid !== userId) {
       return res.status(403).json({ error: "Forbidden: userId mismatch" });
     }
@@ -100,8 +102,6 @@ export default async function handler(req, res) {
       },
     });
 
-    // ✅ BEST FIX: write subscription into Firestore immediately
-    // Note: Stripe gives current_period_end as a Unix timestamp (seconds)
     const currentPeriodEndIso = subscription.current_period_end
       ? new Date(subscription.current_period_end * 1000).toISOString()
       : null;
@@ -110,17 +110,19 @@ export default async function handler(req, res) {
       ? new Date(subscription.start_date * 1000).toISOString()
       : new Date().toISOString();
 
-    const userRef = adminDb.collection("users").doc(userId);
+    const userRef = db.collection("users").doc(userId);
 
     await userRef.set(
       {
         stripeCustomerId: customer.id,
         subscription: {
-          amount: 30, // optional; keep if you rely on it elsewhere
+          amount: 30,
           currency: subscription.currency || "usd",
-          priceId: subscription.items?.data?.[0]?.price?.id || subscriptionPriceId,
-          plan: "barber_monthly", // optional; keep if you rely on it elsewhere
-          status: subscription.status, // likely "incomplete" initially
+          priceId:
+            subscription.items?.data?.[0]?.price?.id ||
+            subscriptionPriceId,
+          plan: "barber_monthly",
+          status: subscription.status,
           subscriptionId: subscription.id,
           startDate: startDateIso,
           currentPeriodEnd: currentPeriodEndIso,
@@ -132,7 +134,8 @@ export default async function handler(req, res) {
 
     return res.status(200).json({
       subscriptionId: subscription.id,
-      clientSecret: subscription.latest_invoice.payment_intent.client_secret,
+      clientSecret:
+        subscription.latest_invoice.payment_intent.client_secret,
       ephemeralKey: ephemeralKey.secret,
       customer: customer.id,
       status: subscription.status,
@@ -143,6 +146,7 @@ export default async function handler(req, res) {
     });
   } catch (error) {
     console.error("create-subscription error:", error);
+
     return res.status(500).json({
       error: error?.message,
       type: error?.type || "unknown_error",

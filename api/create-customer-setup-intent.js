@@ -1,14 +1,10 @@
-// api/create-customer-setup-intent.js
-
 import Stripe from "stripe";
 import { verifyAuthToken } from "./_auth.js";
-import { adminDb } from "./_firebaseAdmin.js";
+import { getAdminDb } from "./_firebaseAdmin.js";
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
   apiVersion: "2023-10-16",
 });
-
-const db = adminDb;
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
@@ -17,24 +13,27 @@ export default async function handler(req, res) {
 
   try {
     const user = await verifyAuthToken(req);
-    if (!user) {
+    if (!user || !user.uid) {
       return res.status(401).json({ error: "Unauthorized" });
     }
 
     const uid = user.uid;
     const { customerEmail, customerName } = req.body;
 
-    if (!customerEmail) {
-      return res.status(400).json({ error: "customerEmail required" });
-    }
+    const host =
+      req.headers["x-forwarded-host"] ||
+      req.headers.host ||
+      "";
 
+    const db = getAdminDb(host);
     const userRef = db.collection("users").doc(uid);
     const userSnap = await userRef.get();
 
-    let stripeCustomerId = userSnap.exists
-      ? userSnap.data()?.stripeCustomerId || null
-      : null;
+    let stripeCustomerId = userSnap.data()?.stripeCustomerId;
 
+    /* -------------------------------
+       CREATE CUSTOMER IF NEEDED
+    --------------------------------*/
     if (!stripeCustomerId) {
       const customer = await stripe.customers.create({
         email: customerEmail,
@@ -44,13 +43,41 @@ export default async function handler(req, res) {
       stripeCustomerId = customer.id;
 
       await userRef.set(
+        { stripeCustomerId },
+        { merge: true }
+      );
+    }
+
+    /* -------------------------------
+       🔥 LINK PAYMENT METHOD (AFTER SAVE)
+    --------------------------------*/
+    const methods = await stripe.paymentMethods.list({
+      customer: stripeCustomerId,
+      type: "card",
+    });
+
+    if (methods.data.length > 0) {
+      const pm = methods.data[0].id;
+
+      // SET DEFAULT IN STRIPE
+      await stripe.customers.update(stripeCustomerId, {
+        invoice_settings: {
+          default_payment_method: pm,
+        },
+      });
+
+      // SAVE REAL VALUE IN FIRESTORE
+      await userRef.set(
         {
-          stripeCustomerId,
+          defaultPaymentMethodId: pm,
         },
         { merge: true }
       );
     }
 
+    /* -------------------------------
+       CREATE SETUP INTENT
+    --------------------------------*/
     const setupIntent = await stripe.setupIntents.create({
       customer: stripeCustomerId,
       payment_method_types: ["card"],
@@ -63,14 +90,16 @@ export default async function handler(req, res) {
     );
 
     return res.status(200).json({
-      setupIntentClientSecret: setupIntent.client_secret,
-      customer: stripeCustomerId,
+      clientSecret: setupIntent.client_secret,
       ephemeralKey: ephemeralKey.secret,
+      customerId: stripeCustomerId,
     });
 
   } catch (error) {
+    console.error("❌ SETUP ERROR:", error);
+
     return res.status(500).json({
-      error: error?.message || "Internal server error",
+      error: error.message,
     });
   }
 }

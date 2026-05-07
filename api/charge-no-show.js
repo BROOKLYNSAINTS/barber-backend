@@ -1,12 +1,10 @@
 import Stripe from "stripe";
-import { adminDb } from "./_firebaseAdmin.js";
+import { getAdminDb } from "./_firebaseAdmin.js";
 import admin from "firebase-admin";
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
   apiVersion: "2023-10-16",
 });
-
-const db = adminDb;
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
@@ -14,6 +12,9 @@ export default async function handler(req, res) {
   }
 
   try {
+    // ✅ FIX: move db inside handler
+    const db = getAdminDb(req.headers.host);
+
     const { appointmentId } = req.body;
 
     if (!appointmentId) {
@@ -87,6 +88,8 @@ export default async function handler(req, res) {
       amountCharged: amountCents / 100,
     });
   } catch (err) {
+    console.error("❌ NO SHOW CHARGE ERROR:", err);
+
     return res.status(500).json({
       error: "Failed to charge no-show",
       details: err.message,

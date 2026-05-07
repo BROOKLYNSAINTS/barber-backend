@@ -2,15 +2,13 @@
 
 import Stripe from "stripe";
 import admin from "firebase-admin";
-import { adminDb } from "./_firebaseAdmin.js";
+import { getAdminDb } from "./_firebaseAdmin.js";
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
   apiVersion: "2023-10-16",
 });
 
-const db = adminDb;
-
-async function writeAppointmentPaymentStatus(appointmentId, paymentIntent) {
+async function writeAppointmentPaymentStatus(db, appointmentId, paymentIntent) {
   if (!appointmentId) return;
 
   await db
@@ -65,6 +63,9 @@ export default async function handler(req, res) {
   }
 
   try {
+    // ✅ FIX: db inside handler
+    const db = getAdminDb(req.headers.host);
+
     const {
       amount,
       customer_id,
@@ -124,6 +125,7 @@ export default async function handler(req, res) {
       });
 
     await writeAppointmentPaymentStatus(
+      db,
       resolvedAppointmentId ||
         paymentIntent.metadata?.appointmentId ||
         null,
@@ -138,6 +140,8 @@ export default async function handler(req, res) {
     });
 
   } catch (error) {
+    console.error("❌ SAVED METHOD PAYMENT ERROR:", error);
+
     return res.status(500).json({
       error: error?.message,
       type: error?.type,

@@ -2,9 +2,7 @@
 
 import Stripe from "stripe";
 import { verifyAuthToken } from "./_auth.js";
-import { adminDb } from "./_firebaseAdmin.js";
-
-const db = adminDb;
+import { getAdminDb } from "./_firebaseAdmin.js";
 
 export default async function handler(req, res) {
   // CORS
@@ -30,6 +28,9 @@ export default async function handler(req, res) {
   }
 
   try {
+    // ✅ FIX: db inside handler
+    const db = getAdminDb(req.headers.host);
+
     const {
       userId,
       email,
@@ -67,13 +68,16 @@ export default async function handler(req, res) {
       stripeConnectOnboardingComplete: false,
     });
 
+    // ✅ dynamic base URL
     const API_BASE =
       process.env.PUBLIC_API_BASE_URL ||
-      process.env.NEXT_PUBLIC_API_BASE_URL ||
-      "https://barber-backend-ten.vercel.app";
+      process.env.NEXT_PUBLIC_API_BASE_URL;
 
-    const fallbackAppReturnUrl =
-      "barberclean://stripe-connect-return";
+    if (!API_BASE) {
+      throw new Error("API_BASE not configured in environment variables");
+    }
+
+    const fallbackAppReturnUrl = "barberclean://connect-return";
 
     const appReturnUrl =
       typeof returnUrl === "string" && returnUrl.length
@@ -113,6 +117,8 @@ export default async function handler(req, res) {
     });
 
   } catch (error) {
+    console.error("❌ CREATE CONNECT ACCOUNT ERROR:", error);
+
     return res.status(500).json({
       error: error?.message || "Failed to create Connect account",
     });

@@ -1,19 +1,22 @@
 import Stripe from "stripe";
-import admin, { adminDb } from "../_firebaseAdmin.js";
+import admin from "firebase-admin";
+import { getAdminDb } from "../_firebaseAdmin.js";
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
   apiVersion: "2023-10-16",
 });
 
 export default async function handler(req, res) {
-  // 🔒 Optional: protect cron with secret
   const cronSecret = req.headers["x-cron-secret"];
   if (process.env.CRON_SECRET && cronSecret !== process.env.CRON_SECRET) {
     return res.status(401).json({ error: "Unauthorized" });
   }
 
   try {
-    const snap = await adminDb
+    // ✅ FIX: db inside handler
+    const db = getAdminDb(req.headers.host);
+
+    const snap = await db
       .collection("appointments")
       .where("status", "==", "late_cancel")
       .where("noShowProtection.status", "==", "pending_charge")
@@ -48,27 +51,25 @@ export default async function handler(req, res) {
 
         if (!amountCents || amountCents <= 0) continue;
 
-        const paymentIntent = await stripe.paymentIntents.create(
-          {
-            amount: amountCents,
-            currency: "usd",
-            customer: appt.customerStripeId,
-            payment_method: appt.customerStripePaymentMethodId,
-            off_session: true,
-            confirm: true,
-            description: `Late cancellation fee – ${appt.serviceName}`,
-            metadata: {
-              appointmentId: doc.id,
-              barberId: appt.barberId,
-              customerId: appt.customerId,
-            },
+        const paymentIntent = await stripe.paymentIntents.create({
+          amount: amountCents,
+          currency: "usd",
+          customer: appt.customerStripeId,
+          payment_method: appt.customerStripePaymentMethodId,
+          off_session: true,
+          confirm: true,
+          description: `Late cancellation fee – ${appt.serviceName}`,
+          transfer_data: {
+            destination: appt.barberStripeAccountId,
           },
-          {
-            stripeAccount: appt.barberStripeAccountId,
-          }
-        );
+          metadata: {
+            appointmentId: doc.id,
+            barberId: appt.barberId,
+            customerId: appt.customerId,
+          },
+        });
 
-        await adminDb.runTransaction(async (tx) => {
+        await db.runTransaction(async (tx) => {
           tx.update(appointmentRef, {
             status: "no_show",
             paymentStatus: "charged",
@@ -83,7 +84,7 @@ export default async function handler(req, res) {
           });
 
           tx.set(
-            adminDb.collection("users").doc(appt.barberId),
+            db.collection("users").doc(appt.barberId),
             {
               metrics: {
                 recoveredRevenue:

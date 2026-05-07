@@ -1,11 +1,9 @@
 import Stripe from "stripe";
-import { adminDb } from "./_firebaseAdmin.js";
+import { getAdminDb } from "./_firebaseAdmin.js";
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
   apiVersion: "2023-10-16",
 });
-
-const db = adminDb;
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
@@ -13,13 +11,16 @@ export default async function handler(req, res) {
   }
 
   try {
+    // ✅ FIX: db inside handler
+    const db = getAdminDb(req.headers.host);
+
     const { userId } = req.body;
 
     if (!userId) {
       return res.status(400).json({ error: "userId required" });
     }
 
-    const stripeAccountId = await getBarberStripeAccountId(userId);
+    const stripeAccountId = await getBarberStripeAccountId(db, userId);
 
     if (!stripeAccountId) {
       return res.status(200).json({ status: "pending" });
@@ -38,6 +39,8 @@ export default async function handler(req, res) {
     });
 
   } catch (error) {
+    console.error("❌ CHECK ACCOUNT STATUS ERROR:", error);
+
     return res.status(500).json({
       error: "Failed to check account status",
       details: error.message,
@@ -45,7 +48,7 @@ export default async function handler(req, res) {
   }
 }
 
-async function getBarberStripeAccountId(userId) {
+async function getBarberStripeAccountId(db, userId) {
   try {
     const userDoc = await db.collection("users").doc(userId).get();
 

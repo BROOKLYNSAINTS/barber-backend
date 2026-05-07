@@ -1,8 +1,6 @@
 // api/create-account-link.js
 import Stripe from "stripe";
-import { adminDb } from "./_firebaseAdmin.js";
-
-const db = adminDb;
+import { getAdminDb } from "./_firebaseAdmin.js";
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -19,6 +17,9 @@ export default async function handler(req, res) {
   }
 
   try {
+    // ✅ FIX: db inside handler
+    const db = getAdminDb(req.headers.host);
+
     const { barberId, email, name, returnUrl, refreshUrl } = req.body;
 
     if (!barberId || !email || !returnUrl || !refreshUrl) {
@@ -77,7 +78,10 @@ export default async function handler(req, res) {
     });
 
     return res.status(200).json({ url: accountLink.url });
+
   } catch (error) {
+    console.error("❌ CREATE ACCOUNT LINK ERROR:", error);
+
     return res.status(500).json({ error: error.message });
   }
 }

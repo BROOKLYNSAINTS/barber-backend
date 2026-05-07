@@ -1,37 +1,32 @@
 // api/_auth.js
-// Uses Firebase Admin from _firebaseAdmin.js
 
-import { adminAuth } from './_firebaseAdmin.js';
+import { getAdminApp } from "./_firebaseAdmin.js";
 
-/**
- * Verify Firebase ID token from Authorization header
- */
 export async function verifyAuthToken(req) {
   try {
-    const authHeader =
-      req.headers.authorization || req.headers.Authorization;
+    const authHeader = req.headers.authorization;
 
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      console.log("❌ No Authorization header");
       return null;
     }
 
-    const token = authHeader.split('Bearer ')[1];
-    if (!token) return null;
+    const token = authHeader.split("Bearer ")[1];
 
-    const decoded = await adminAuth.verifyIdToken(token);
+    // 🔴 Prefer explicit header from frontend, fallback to host
+    const source =
+      req.headers["x-backend-base-url"] ||
+      req.headers.host ||
+      "";
+
+    const adminApp = getAdminApp(source);
+
+    const decoded = await adminApp.auth().verifyIdToken(token);
+
     return decoded;
+
   } catch (error) {
-    console.error(
-      '❌ Firebase token verification failed:',
-      error.message
-    );
+    console.log("❌ TOKEN VERIFY ERROR:", error.message);
     return null;
   }
-}
-
-/**
- * Legacy compatibility helper
- */
-export async function getAuthUser(req) {
-  return verifyAuthToken(req);
 }

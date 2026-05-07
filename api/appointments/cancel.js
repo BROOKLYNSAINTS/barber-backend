@@ -1,4 +1,5 @@
-import admin, { adminDb } from "../_firebaseAdmin.js";
+import admin from "firebase-admin";
+import { getAdminDb } from "../_firebaseAdmin.js";
 
 /**
  * Hours until appointment (local-safe)
@@ -19,6 +20,9 @@ export default async function handler(req, res) {
   }
 
   try {
+    // ✅ FIX: db inside handler
+    const db = getAdminDb(req.headers.host);
+
     /* ----------------------------------
      * Auth
      * ---------------------------------- */
@@ -34,9 +38,9 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Missing appointmentId" });
     }
 
-    const apptRef = adminDb.collection("appointments").doc(appointmentId);
+    const apptRef = db.collection("appointments").doc(appointmentId);
 
-    const result = await adminDb.runTransaction(async (tx) => {
+    const result = await db.runTransaction(async (tx) => {
       const snap = await tx.get(apptRef);
       if (!snap.exists) throw new Error("Appointment not found");
 
@@ -50,7 +54,7 @@ export default async function handler(req, res) {
         throw new Error("Appointment not cancellable");
       }
 
-      const barberRef = adminDb.collection("users").doc(appt.barberId);
+      const barberRef = db.collection("users").doc(appt.barberId);
       const barberSnap = await tx.get(barberRef);
       const settings = barberSnap.data()?.noShowSettings;
 

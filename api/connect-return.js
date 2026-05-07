@@ -1,11 +1,47 @@
 // api/connect-return.js
 
 import Stripe from "stripe";
-import { adminDb } from "./_firebaseAdmin.js";
+import { getAdminApp } from "./_firebaseAdmin.js";
+import twilio from "twilio";
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
   apiVersion: "2023-10-16",
 });
+
+// ✅ Twilio setup
+const accountSid = process.env.TWILIO_ACCOUNT_SID?.trim();
+const authToken = process.env.TWILIO_AUTH_TOKEN?.trim();
+
+if (!accountSid || !authToken) {
+  throw new Error("Twilio env not loaded");
+}
+
+const twilioClient = twilio(accountSid, authToken);
+
+const FALLBACK_AREA_CODES = ["718", "347", "917", "646", "929", "516", "201"];
+
+async function findAvailableTwilioNumber() {
+  for (const areaCode of FALLBACK_AREA_CODES) {
+    try {
+      const numbers = await twilioClient.availablePhoneNumbers("US").local.list({
+        areaCode,
+        limit: 1,
+      });
+
+      if (numbers.length > 0) {
+        return numbers[0].phoneNumber;
+      }
+    } catch (error) {
+      console.error("Area code check failed:", areaCode, error.message);
+    }
+  }
+
+  const anyNumbers = await twilioClient.availablePhoneNumbers("US").local.list({
+    limit: 1,
+  });
+
+  return anyNumbers.length ? anyNumbers[0].phoneNumber : null;
+}
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -21,10 +57,16 @@ export default async function handler(req, res) {
     return res.status(405).send("Method Not Allowed");
   }
 
+  const source =
+    req.headers["x-backend-base-url"] ||
+    req.headers.host;
+
+  const adminApp = getAdminApp(source);
+  const db = adminApp.firestore();
+
   const { state, account, returnUrl } = req.query || {};
 
-  const fallbackReturnUrl = "barberclean://stripe-connect-return";
-
+  const fallbackReturnUrl = "barberclean://connect-return";
   const baseReturnUrl =
     typeof returnUrl === "string" && returnUrl.length
       ? returnUrl
@@ -34,7 +76,6 @@ export default async function handler(req, res) {
 
   let redirectTo = `${baseReturnUrl}${joiner}success=1`;
 
-  // If we don't have userId (state) we can't attach subscription to user doc
   if (!(typeof state === "string" && state.length)) {
     res.statusCode = 302;
     res.setHeader("Location", redirectTo);
@@ -44,150 +85,111 @@ export default async function handler(req, res) {
   const userId = state;
 
   try {
-    // 1) Update Firestore: Connect onboarding complete
-    if (typeof account === "string" && account.length) {
-      await adminDb.collection("users").doc(userId).set(
-        {
-          stripeConnectAccountId: account,
-          stripeConnectOnboardingComplete: true,
-          updatedAt: new Date().toISOString(),
-        },
-        { merge: true }
-      );
-    } else {
-      await adminDb.collection("users").doc(userId).set(
-        {
-          stripeConnectOnboardingComplete: true,
-          updatedAt: new Date().toISOString(),
-        },
-        { merge: true }
-      );
-    }
+    const userRef = db.collection("users").doc(userId);
 
-    // 2) Load user profile to get email (required for Stripe customer)
-    const userSnap = await adminDb.collection("users").doc(userId).get();
-    const userData = userSnap.exists ? userSnap.data() : null;
-
-    const customerEmail = userData?.email;
-    if (!customerEmail) {
-      // Can't create a Stripe customer without email in your current design
-      redirectTo += `&subscription_created=0&reason=${encodeURIComponent(
-        "missing_email"
-      )}`;
-      redirectTo += `&state=${encodeURIComponent(userId)}`;
-      if (account) redirectTo += `&account=${encodeURIComponent(account)}`;
-
-      res.statusCode = 302;
-      res.setHeader("Location", redirectTo);
-      return res.end();
-    }
-
-    // If subscription already exists in Firestore, don't create another
-    const existingSubId = userData?.subscription?.subscriptionId;
-    if (existingSubId) {
-      redirectTo += `&subscription_created=0&already_subscribed=1`;
-      redirectTo += `&state=${encodeURIComponent(userId)}`;
-      if (account) redirectTo += `&account=${encodeURIComponent(account)}`;
-
-      res.statusCode = 302;
-      res.setHeader("Location", redirectTo);
-      return res.end();
-    }
-
-    const subscriptionPriceId = process.env.STRIPE_SUBSCRIPTION_PRICE_ID;
-    if (!subscriptionPriceId) {
-      redirectTo += `&subscription_created=0&reason=${encodeURIComponent(
-        "missing_price_id"
-      )}`;
-      redirectTo += `&state=${encodeURIComponent(userId)}`;
-      if (account) redirectTo += `&account=${encodeURIComponent(account)}`;
-
-      res.statusCode = 302;
-      res.setHeader("Location", redirectTo);
-      return res.end();
-    }
-
-    // 3) Find or create Stripe customer (prefer using stored stripeCustomerId)
-    let customerId = userData?.stripeCustomerId;
-
-    if (customerId) {
-      // sanity check: ensure customer exists
-      try {
-        await stripe.customers.retrieve(customerId);
-      } catch {
-        customerId = null;
-      }
-    }
-
-    if (!customerId) {
-      const existingCustomers = await stripe.customers.list({
-        email: customerEmail,
-        limit: 1,
-      });
-
-      if (existingCustomers.data.length > 0) {
-        customerId = existingCustomers.data[0].id;
-        if (existingCustomers.data[0].metadata?.userId !== userId) {
-          await stripe.customers.update(customerId, {
-            metadata: { userId },
-          });
-        }
-      } else {
-        const created = await stripe.customers.create({
-          email: customerEmail,
-          metadata: { userId },
-        });
-        customerId = created.id;
-      }
-    }
-
-    // 4) Create subscription
-    // NOTE: This creates a subscription. If you require collecting a card in-app,
-    // this may create "incomplete" until payment is confirmed.
-    const subscription = await stripe.subscriptions.create({
-      customer: customerId,
-      items: [{ price: subscriptionPriceId }],
-      payment_behavior: "default_incomplete",
-      payment_settings: {
-        save_default_payment_method: "on_subscription",
-        payment_method_types: ["card"],
-      },
-      metadata: { userId },
-    });
-
-    const currentPeriodEndIso = subscription.current_period_end
-      ? new Date(subscription.current_period_end * 1000).toISOString()
-      : null;
-
-    const startDateIso = subscription.start_date
-      ? new Date(subscription.start_date * 1000).toISOString()
-      : new Date().toISOString();
-
-    // 5) Write Firestore subscription fields immediately
-    await adminDb.collection("users").doc(userId).set(
+    // ✅ 1. Mark onboarding complete
+    await userRef.set(
       {
-        stripeCustomerId: customerId,
-        subscription: {
-          subscriptionId: subscription.id,
-          status: subscription.status,
-          priceId: subscription.items?.data?.[0]?.price?.id || subscriptionPriceId,
-          plan: "barber_monthly",
-          amount: 30,
-          currency: subscription.currency || "usd",
-          startDate: startDateIso,
-          currentPeriodEnd: currentPeriodEndIso,
-        },
+        stripeConnectAccountId: account || null,
+        stripeConnectOnboardingComplete: true,
         updatedAt: new Date().toISOString(),
       },
       { merge: true }
     );
 
+    // ✅ 2. Load user
+    const userSnap = await userRef.get();
+    const userData = userSnap.exists ? userSnap.data() : null;
+
+    const customerEmail = userData?.email;
+
+    if (!customerEmail) {
+      redirectTo += `&subscription_created=0&reason=missing_email`;
+      redirectTo += `&state=${encodeURIComponent(userId)}`;
+      return res.redirect(302, redirectTo);
+    }
+
+    // ✅ 3. Ensure Stripe customer
+    let customerId = userData?.stripeCustomerId;
+
+    if (!customerId) {
+      const existing = await stripe.customers.list({
+        email: customerEmail,
+        limit: 1,
+      });
+
+      customerId =
+        existing.data.length > 0
+          ? existing.data[0].id
+          : (await stripe.customers.create({
+              email: customerEmail,
+              metadata: { userId },
+            })).id;
+    }
+
+    // ✅ 4. Ensure subscription (safe)
+    if (!userData?.subscription?.subscriptionId) {
+      const subscription = await stripe.subscriptions.create({
+        customer: customerId,
+        items: [{ price: process.env.STRIPE_SUBSCRIPTION_PRICE_ID }],
+      });
+
+      await userRef.set(
+        {
+          stripeCustomerId: customerId,
+          subscription: {
+            subscriptionId: subscription.id,
+            status: subscription.status,
+          },
+        },
+        { merge: true }
+      );
+    }
+
+    // 🔥 5. TWILIO PROVISIONING (THIS IS THE FIX)
+    const latestSnap = await userRef.get();
+    const latestData = latestSnap.data();
+
+    if (
+      latestData?.stripeConnectOnboardingComplete &&
+      latestData?.subscription?.status === "active" &&
+      !latestData?.twilioPhoneNumber
+    ) {
+      console.log("🔥 Provisioning Twilio number...");
+
+      const phoneNumber = await findAvailableTwilioNumber();
+
+      if (phoneNumber) {
+        const BASE_URL = process.env.PUBLIC_API_BASE_URL;
+
+        const incoming = await twilioClient.incomingPhoneNumbers.create({
+          phoneNumber,
+          voiceUrl: `${BASE_URL}/api/voice`,
+          voiceMethod: "POST",
+          smsUrl: `${BASE_URL}/api/sms-reply`,
+          smsMethod: "POST",
+        });
+
+        await userRef.set(
+          {
+            twilioPhoneNumber: incoming.phoneNumber,
+            twilioSid: incoming.sid,
+            twilioProvisionStatus: "provisioned",
+          },
+          { merge: true }
+        );
+
+        console.log("✅ Twilio number assigned:", incoming.phoneNumber);
+      } else {
+        console.log("❌ No Twilio numbers available");
+      }
+    }
+
     redirectTo += `&subscription_created=1`;
+
   } catch (err) {
-    console.error("connect-return subscription provisioning error:", err);
-    redirectTo += `&subscription_created=0&reason=${encodeURIComponent(
-      "provision_failed"
-    )}`;
+    console.error("connect-return error:", err);
+    redirectTo += `&subscription_created=0&reason=provision_failed`;
   }
 
   redirectTo += `&state=${encodeURIComponent(state)}`;

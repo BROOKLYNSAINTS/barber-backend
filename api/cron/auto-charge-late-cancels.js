@@ -1,5 +1,6 @@
 import Stripe from "stripe";
-import admin, { adminDb } from "../_firebaseAdmin.js";
+import admin from "firebase-admin";
+import { getAdminDb } from "../_firebaseAdmin.js";
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
   apiVersion: "2023-10-16",
@@ -15,7 +16,10 @@ export default async function handler(req, res) {
       return res.status(401).json({ error: "Unauthorized" });
     }
 
-    const snap = await adminDb
+    // ✅ FIX: db inside handler
+    const db = getAdminDb(req.headers.host);
+
+    const snap = await db
       .collection("appointments")
       .where("noShowProtection.status", "==", "pending_charge")
       .limit(25)
@@ -58,24 +62,22 @@ export default async function handler(req, res) {
           continue;
         }
 
-        const intent = await stripe.paymentIntents.create(
-          {
-            amount: amountCents,
-            currency: "usd",
-            customer: appt.customerStripeId,
-            payment_method: appt.customerStripePaymentMethodId,
-            off_session: true,
-            confirm: true,
-            description: "Late cancellation fee",
-            metadata: {
-              appointmentId: doc.id,
-              type: "late_cancel",
-            },
+        const intent = await stripe.paymentIntents.create({
+          amount: amountCents,
+          currency: "usd",
+          customer: appt.customerStripeId,
+          payment_method: appt.customerStripePaymentMethodId,
+          off_session: true,
+          confirm: true,
+          description: "Late cancellation fee",
+          transfer_data: {
+            destination: appt.barberStripeAccountId,
           },
-          {
-            stripeAccount: appt.barberStripeAccountId,
-          }
-        );
+          metadata: {
+            appointmentId: doc.id,
+            type: "late_cancel",
+          },
+        });
 
         await doc.ref.update({
           status: "late_cancel_charged",
@@ -85,7 +87,7 @@ export default async function handler(req, res) {
           chargedAt: admin.firestore.FieldValue.serverTimestamp(),
         });
 
-        await adminDb
+        await db
           .collection("users")
           .doc(appt.barberId)
           .set(

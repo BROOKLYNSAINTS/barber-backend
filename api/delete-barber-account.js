@@ -1,5 +1,5 @@
 import Stripe from "stripe";
-import { adminDb } from "./_firebaseAdmin.js";
+import { getAdminDb } from "./_firebaseAdmin.js";
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
   apiVersion: "2023-10-16",
@@ -11,6 +11,9 @@ export default async function handler(req, res) {
   }
 
   try {
+    // ✅ FIX: db inside handler
+    const db = getAdminDb(req.headers.host);
+
     const { userId } = req.body;
 
     if (!userId) {
@@ -18,7 +21,7 @@ export default async function handler(req, res) {
     }
 
     // 🔎 Get barber document
-    const userRef = adminDb.collection("users").doc(userId);
+    const userRef = db.collection("users").doc(userId);
     const snap = await userRef.get();
 
     if (!snap.exists) {
@@ -48,7 +51,8 @@ export default async function handler(req, res) {
     return res.status(200).json({ success: true });
 
   } catch (error) {
-    console.error("Delete barber account error:", error);
+    console.error("❌ DELETE BARBER ACCOUNT ERROR:", error);
+
     return res.status(500).json({ error: "Internal server error" });
   }
 }

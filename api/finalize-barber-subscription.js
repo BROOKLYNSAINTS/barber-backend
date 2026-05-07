@@ -1,71 +1,82 @@
-// api/finalize-barber-subscription.js
-
+import "dotenv/config";
 import Stripe from "stripe";
 import admin from "firebase-admin";
-import { adminDb } from "./_firebaseAdmin.js";
+import twilio from "twilio";
+import { getAdminDb } from "./_firebaseAdmin.js";
 import { verifyAuthToken } from "./_auth.js";
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
   apiVersion: "2023-10-16",
 });
 
+// ✅ FIX: trim env values
+const accountSid = process.env.TWILIO_ACCOUNT_SID?.trim();
+const authToken = process.env.TWILIO_AUTH_TOKEN?.trim();
+
+if (!accountSid || !authToken) {
+  throw new Error("Twilio env not loaded");
+}
+
+const twilioClient = twilio(accountSid, authToken);
+
+const FALLBACK_AREA_CODES = ["718", "347", "917", "646", "929", "516", "201"];
+
+async function findAvailableTwilioNumber() {
+  for (const areaCode of FALLBACK_AREA_CODES) {
+    try {
+      const numbers = await twilioClient.availablePhoneNumbers("US").local.list({
+        areaCode,
+        limit: 1,
+      });
+
+      if (numbers.length > 0) {
+        return numbers[0].phoneNumber;
+      }
+    } catch (error) {
+      console.error("Area code check failed:", areaCode, error.message);
+    }
+  }
+
+  const anyNumbers = await twilioClient.availablePhoneNumbers("US").local.list({
+    limit: 1,
+  });
+
+  return anyNumbers.length ? anyNumbers[0].phoneNumber : null;
+}
+
 export default async function handler(req, res) {
+
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 
   if (req.method === "OPTIONS") return res.status(200).end();
-  if (req.method !== "POST")
+  if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
+  }
 
   const user = await verifyAuthToken(req);
   if (!user) return res.status(401).json({ error: "Unauthorized" });
 
   try {
+    // ✅ FIX: db inside handler
+    const db = getAdminDb(req.headers.host);
+
     const { userId, customerEmail, setupIntentId, priceId } = req.body;
 
     if (!userId) return res.status(400).json({ error: "Missing userId" });
-    if (user.uid !== userId)
+    if (user.uid !== userId) {
       return res.status(403).json({ error: "Forbidden: userId mismatch" });
-    if (!customerEmail)
+    }
+    if (!customerEmail) {
       return res.status(400).json({ error: "Missing customerEmail" });
-    if (!setupIntentId)
-      return res.status(400).json({ error: "Missing setupIntentId" });
-
-    const subscriptionPriceId =
-      priceId || process.env.STRIPE_SUBSCRIPTION_PRICE_ID;
-
-    if (!subscriptionPriceId) {
-      return res
-        .status(500)
-        .json({ error: "Missing STRIPE_SUBSCRIPTION_PRICE_ID" });
     }
 
-    const userRef = adminDb.collection("users").doc(userId);
+    const userRef = db.collection("users").doc(userId);
     const snap = await userRef.get();
     const userData = snap.exists ? snap.data() : null;
 
-    if (userData?.subscription?.subscriptionId) {
-      return res.status(200).json({
-        ok: true,
-        alreadySubscribed: true,
-        subscriptionId: userData.subscription.subscriptionId,
-        status: userData.subscription.status,
-      });
-    }
-
-    // -----------------------------
-    // 1️⃣ FIND OR CREATE CUSTOMER
-    // -----------------------------
     let customerId = userData?.stripeCustomerId;
-
-    if (customerId) {
-      try {
-        await stripe.customers.retrieve(customerId);
-      } catch {
-        customerId = null;
-      }
-    }
 
     if (!customerId) {
       const existing = await stripe.customers.list({
@@ -73,115 +84,80 @@ export default async function handler(req, res) {
         limit: 1,
       });
 
-      if (existing.data.length > 0) {
-        customerId = existing.data[0].id;
-      } else {
-        const created = await stripe.customers.create({
-          email: customerEmail,
-          metadata: { userId },
+      customerId =
+        existing.data.length > 0
+          ? existing.data[0].id
+          : (await stripe.customers.create({
+              email: customerEmail,
+              metadata: { userId },
+            })).id;
+    }
+
+    if (setupIntentId) {
+      const setupIntent = await stripe.setupIntents.retrieve(setupIntentId);
+
+      if (setupIntent.status !== "succeeded") {
+        return res.status(400).json({ error: "SetupIntent not succeeded" });
+      }
+
+      const paymentMethodId = setupIntent.payment_method;
+
+      await stripe.paymentMethods.attach(paymentMethodId, {
+        customer: customerId,
+      }).catch(() => {});
+
+      await stripe.customers.update(customerId, {
+        invoice_settings: { default_payment_method: paymentMethodId },
+      });
+
+      if (priceId || process.env.STRIPE_SUBSCRIPTION_PRICE_ID) {
+        const subscription = await stripe.subscriptions.create({
+          customer: customerId,
+          items: [{ price: priceId || process.env.STRIPE_SUBSCRIPTION_PRICE_ID }],
         });
-        customerId = created.id;
+
+        await userRef.set(
+          {
+            stripeCustomerId: customerId,
+            subscription: {
+              subscriptionId: subscription.id,
+              status: subscription.status,
+            },
+          },
+          { merge: true }
+        );
       }
     }
 
-    // -----------------------------
-    // 2️⃣ VERIFY SETUP INTENT
-    // -----------------------------
-    const setupIntent = await stripe.setupIntents.retrieve(setupIntentId);
+    const BASE_URL = `http://${req.headers.host}`;
 
-    if (setupIntent.status !== "succeeded") {
-      return res.status(400).json({
-        error: "SetupIntent not succeeded",
-        status: setupIntent.status,
-      });
+    if (!snap.data()?.twilioPhoneNumber) {
+      const phoneNumber = await findAvailableTwilioNumber();
+
+      if (phoneNumber) {
+        const incoming = await twilioClient.incomingPhoneNumbers.create({
+          phoneNumber,
+          voiceUrl: `${BASE_URL}/api/voice`,
+          voiceMethod: "POST",
+          smsUrl: `${BASE_URL}/api/sms-reply`,
+          smsMethod: "POST",
+        });
+
+        await userRef.set(
+          {
+            twilioPhoneNumber: incoming.phoneNumber,
+            twilioSid: incoming.sid,
+            twilioProvisionStatus: "provisioned",
+          },
+          { merge: true }
+        );
+      }
     }
 
-    const paymentMethodId = setupIntent.payment_method;
+    return res.status(200).json({ ok: true });
 
-    if (!paymentMethodId) {
-      return res.status(400).json({ error: "No payment method found" });
-    }
-
-    // Attach (safe if already attached)
-    try {
-      await stripe.paymentMethods.attach(paymentMethodId, {
-        customer: customerId,
-      });
-    } catch {}
-
-    // Set as default
-    await stripe.customers.update(customerId, {
-      invoice_settings: { default_payment_method: paymentMethodId },
-    });
-
-    // -----------------------------
-    // 3️⃣ CREATE SUBSCRIPTION (FIXED)
-    // -----------------------------
-    const subscription = await stripe.subscriptions.create({
-      customer: customerId,
-      items: [{ price: subscriptionPriceId }],
-      payment_behavior: "allow_incomplete",
-      expand: ["latest_invoice.payment_intent"],
-      metadata: { userId },
-    });
-
-    // -----------------------------
-    // 4️⃣ CONFIRM FIRST INVOICE
-    // -----------------------------
-    const paymentIntent =
-      subscription.latest_invoice?.payment_intent;
-
-    if (
-      paymentIntent &&
-      paymentIntent.status === "requires_confirmation"
-    ) {
-      await stripe.paymentIntents.confirm(paymentIntent.id);
-    }
-
-    // Retrieve updated subscription after confirmation
-    const updatedSub = await stripe.subscriptions.retrieve(
-      subscription.id
-    );
-
-    const startDateIso = updatedSub.start_date
-      ? new Date(updatedSub.start_date * 1000).toISOString()
-      : new Date().toISOString();
-
-    const currentPeriodEndIso = updatedSub.current_period_end
-      ? new Date(updatedSub.current_period_end * 1000).toISOString()
-      : null;
-
-    // -----------------------------
-    // 5️⃣ WRITE FIRESTORE
-    // -----------------------------
-    await userRef.set(
-      {
-        stripeCustomerId: customerId,
-        subscription: {
-          subscriptionId: updatedSub.id,
-          status: updatedSub.status,
-          priceId:
-            updatedSub.items?.data?.[0]?.price?.id ||
-            subscriptionPriceId,
-          plan: "barber_monthly",
-          amount: 30,
-          currency: updatedSub.currency || "usd",
-          startDate: startDateIso,
-          currentPeriodEnd: currentPeriodEndIso,
-        },
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      },
-      { merge: true }
-    );
-
-    return res.status(200).json({
-      ok: true,
-      subscriptionId: updatedSub.id,
-      status: updatedSub.status,
-      customerId,
-    });
   } catch (error) {
-    console.error("finalize-barber-subscription error:", error);
+    console.error("FINAL ERROR:", error);
     return res.status(500).json({
       error: error?.message || "Internal error",
     });

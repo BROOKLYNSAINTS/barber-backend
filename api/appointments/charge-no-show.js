@@ -1,5 +1,6 @@
 import Stripe from "stripe";
-import admin, { adminDb } from "../_firebaseAdmin.js";
+import admin from "firebase-admin";
+import { getAdminDb } from "../_firebaseAdmin.js";
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
   apiVersion: "2023-10-16",
@@ -11,6 +12,9 @@ export default async function handler(req, res) {
   }
 
   try {
+    // ✅ FIX: db inside handler
+    const db = getAdminDb(req.headers.host);
+
     /* ----------------------------------
      * Auth (BARBER)
      * ---------------------------------- */
@@ -26,11 +30,11 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Missing appointmentId" });
     }
 
-    const appointmentRef = adminDb
+    const appointmentRef = db
       .collection("appointments")
       .doc(appointmentId);
 
-    const result = await adminDb.runTransaction(async (tx) => {
+    const result = await db.runTransaction(async (tx) => {
       const snap = await tx.get(appointmentRef);
       if (!snap.exists) {
         throw new Error("Appointment not found");
@@ -82,7 +86,7 @@ export default async function handler(req, res) {
       }
 
       /* ----------------------------------
-       * STRIPE CHARGE (CONNECTED ACCOUNT)
+       * STRIPE CHARGE
        * ---------------------------------- */
       const paymentIntent = await stripe.paymentIntents.create(
         {
@@ -93,14 +97,14 @@ export default async function handler(req, res) {
           off_session: true,
           confirm: true,
           description: `No-show fee – ${appt.serviceName || "Service"}`,
+          transfer_data: {
+            destination: appt.barberStripeAccountId,
+          },
           metadata: {
             appointmentId,
             barberId: appt.barberId,
             customerId: appt.customerId,
           },
-        },
-        {
-          stripeAccount: appt.barberStripeAccountId,
         }
       );
 
@@ -120,9 +124,8 @@ export default async function handler(req, res) {
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       });
 
-      // 📊 Recovered revenue (lifetime)
       tx.set(
-        adminDb.collection("users").doc(appt.barberId),
+        db.collection("users").doc(appt.barberId),
         {
           metrics: {
             recoveredRevenue:
