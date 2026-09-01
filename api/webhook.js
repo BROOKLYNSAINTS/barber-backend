@@ -66,7 +66,73 @@ async function sendToAgent(type, message, data = {}, req) {
     console.log("Agent alert failed:", err.message);
   }
 }
+async function sendPaymentFailureSMS(pi, db) {
+  try {
+    const appointmentId = pi.metadata?.appointmentId;
 
+    if (!appointmentId) {
+      console.log("No appointmentId found on PaymentIntent");
+      return;
+    }
+
+    const appointmentSnap = await db
+      .collection("appointments")
+      .doc(appointmentId)
+      .get();
+
+    if (!appointmentSnap.exists) {
+      console.log("Appointment not found");
+      return;
+    }
+
+    const appointment = appointmentSnap.data();
+
+    const barberId = appointment.barberId;
+    const customerId = appointment.customerId;
+
+    if (!barberId || !customerId) {
+      console.log("Missing barberId or customerId");
+      return;
+    }
+
+    const barberSnap = await db
+      .collection("users")
+      .doc(barberId)
+      .get();
+
+    const customerSnap = await db
+      .collection("users")
+      .doc(customerId)
+      .get();
+
+    if (!barberSnap.exists || !customerSnap.exists) {
+      console.log("Barber or customer not found");
+      return;
+    }
+
+    const barber = barberSnap.data();
+    const customer = customerSnap.data();
+
+    const fromNumber = barber.twilioPhoneNumber;
+    const toNumber = customer.phone;
+
+    if (!fromNumber || !toNumber) {
+      console.log("Missing phone numbers");
+      return;
+    }
+
+    await twilioClient.messages.create({
+      from: fromNumber,
+      to: toNumber,
+      body:
+        "Your payment for your appointment did not go through. Please update your payment method to confirm your booking.",
+    });
+
+    console.log("Payment failure SMS sent");
+  } catch (err) {
+    console.log("Payment failure SMS error:", err.message);
+  }
+}
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).send("Method Not Allowed");
@@ -203,17 +269,18 @@ export default async function handler(req, res) {
     /* =========================
        🚨 PAYMENT FAILED
     ========================= */
-    if (event.type === "payment_intent.payment_failed") {
-      const pi = event.data.object;
+if (event.type === "payment_intent.payment_failed") {
+  const pi = event.data.object;
 
-      await sendToAgent(
-        "payment_failed",
-        `Payment failed (PI: ${pi.id})`,
-        pi,
-        req
-      );
-    }
+  await sendPaymentFailureSMS(pi, db);
 
+  await sendToAgent(
+    "payment_failed",
+    `Payment failed (PI: ${pi.id})`,
+    pi,
+    req
+  );
+}
     /* =========================
        🚨 PAYOUT FAILED
     ========================= */

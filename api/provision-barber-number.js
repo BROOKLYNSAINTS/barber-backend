@@ -6,17 +6,20 @@ const client = twilio(
   process.env.TWILIO_AUTH_TOKEN
 );
 
-const MESSAGING_SERVICE_SID = process.env.TWILIO_MESSAGING_SERVICE_SID;
+const MESSAGING_SERVICE_SID =
+  process.env.TWILIO_MESSAGING_SERVICE_SID;
 
 export default async function handler(req, res) {
   try {
-    // ✅ FIX: db inside handler
+    // ✅ DB
     const db = getAdminDb(req.headers.host);
 
-    const { barberId, areaCode } = req.body;
+    const { barberId } = req.body;
 
     if (!barberId) {
-      return res.status(400).json({ error: "Missing barberId" });
+      return res.status(400).json({
+        error: "Missing barberId",
+      });
     }
 
     const API_BASE =
@@ -31,34 +34,57 @@ export default async function handler(req, res) {
     }
 
     const userRef = db.collection("users").doc(barberId);
+
     const snap = await userRef.get();
 
-    // prevent duplicate provisioning
+    // ✅ prevent duplicate provisioning
     if (snap.exists && snap.data()?.twilioPhoneNumber) {
-      return res.json({ success: true, message: "Already provisioned" });
+      return res.json({
+        success: true,
+        message: "Already provisioned",
+      });
     }
 
-    // 🔍 Find available number
-    const numbers = await client.availablePhoneNumbers("US")
-      .local
-      .list({ areaCode: areaCode || 718, limit: 1 });
+    // 🔥 FIND AVAILABLE NUMBER
+const areaCodes = ["718", "347", "646"];
 
-    if (!numbers.length) {
-      return res.status(400).json({ error: "No numbers available" });
-    }
+let selectedNumber = null;
 
-    const selectedNumber = numbers[0].phoneNumber;
+for (const areaCode of areaCodes) {
 
-    // 📞 Purchase number
-    const purchasedNumber = await client.incomingPhoneNumbers.create({
-      phoneNumber: selectedNumber,
-      voiceUrl: `${VOICE_BASE}/api/voice`,
-      voiceMethod: "POST",
-      smsUrl: `${API_BASE}/api/sms-reply`,
-      smsMethod: "POST",
+  const numbers = await client
+    .availablePhoneNumbers("US")
+    .local
+    .list({
+      areaCode,
+      limit: 1,
     });
 
-    // 🚨 Attach to Messaging Service
+  if (numbers.length > 0) {
+    selectedNumber = numbers[0].phoneNumber;
+    break;
+  }
+}
+
+if (!selectedNumber) {
+  return res.status(400).json({
+    error: "No local numbers available",
+  });
+}
+
+    // 📞 PURCHASE NUMBER
+    const purchasedNumber =
+      await client.incomingPhoneNumbers.create({
+        phoneNumber: selectedNumber,
+
+        voiceUrl: `${VOICE_BASE}/api/voice`,
+        voiceMethod: "POST",
+
+        smsUrl: `${API_BASE}/api/sms-reply`,
+        smsMethod: "POST",
+      });
+
+    // ✅ ATTACH TO MESSAGING SERVICE
     if (MESSAGING_SERVICE_SID) {
       await client.messaging
         .services(MESSAGING_SERVICE_SID)
@@ -67,22 +93,30 @@ export default async function handler(req, res) {
           phoneNumberSid: purchasedNumber.sid,
         });
     } else {
-      console.warn("Missing TWILIO_MESSAGING_SERVICE_SID");
+      console.warn(
+        "Missing TWILIO_MESSAGING_SERVICE_SID"
+      );
     }
 
-    // 💾 Save to Firestore
+    // 💾 SAVE TO FIRESTORE
     await userRef.update({
       twilioPhoneNumber: purchasedNumber.phoneNumber,
       twilioPhoneNumberSid: purchasedNumber.sid,
-    });
+      twilioProvisionedAt: new Date().toISOString(),
+      twilioNumberType: "local",    });
 
-    res.json({
+    return res.json({
       success: true,
       number: purchasedNumber.phoneNumber,
     });
 
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Failed to create Twilio number" });
+    console.error("Provisioning error:", error);
+
+    return res.status(500).json({
+      error:
+        error?.message ||
+        "Failed to create Twilio number",
+    });
   }
 }

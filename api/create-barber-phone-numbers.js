@@ -10,10 +10,10 @@ const MESSAGING_SERVICE_SID = process.env.TWILIO_MESSAGING_SERVICE_SID;
 
 export default async function handler(req, res) {
   try {
-    // ✅ FIX: db inside handler
+    // ✅ DB
     const db = getAdminDb(req.headers.host);
 
-    const { barberId, zipcode } = req.body;
+    const { barberId } = req.body;
 
     if (!barberId) {
       return res.status(400).json({ error: "Missing barberId" });
@@ -35,36 +35,35 @@ export default async function handler(req, res) {
     const snap = await userRef.get();
 
     if (snap.exists && snap.data()?.twilioPhoneNumber) {
-      return res.json({ success: true, message: "Already provisioned" });
+      return res.json({
+        success: true,
+        message: "Already provisioned",
+      });
     }
 
-    // ✅ derive area code safely
-    const areaCode =
-      zipcode && zipcode.length >= 3
-        ? zipcode.substring(0, 3)
-        : "718";
-
-    // 🔍 find available number
+    // 🔥 GET AVAILABLE TOLL FREE NUMBER
     const numbers = await client.availablePhoneNumbers("US")
-      .local
-      .list({ areaCode, limit: 1 });
+      .tollFree
+      .list({ limit: 1 });
 
     if (!numbers.length) {
-      throw new Error("No numbers available");
+      throw new Error("No toll-free numbers available");
     }
 
     const selectedNumber = numbers[0].phoneNumber;
 
-    // 📞 purchase number
+    // 📞 PURCHASE NUMBER
     const incoming = await client.incomingPhoneNumbers.create({
       phoneNumber: selectedNumber,
+
       voiceUrl: `${VOICE_BASE}/api/voice`,
       voiceMethod: "POST",
+
       smsUrl: `${API_BASE}/api/sms-reply`,
       smsMethod: "POST",
     });
 
-    // 🚨 attach to messaging service (A2P compliance)
+    // ✅ attach to messaging service
     if (MESSAGING_SERVICE_SID) {
       try {
         await client.messaging
@@ -74,26 +73,36 @@ export default async function handler(req, res) {
             phoneNumberSid: incoming.sid,
           });
       } catch (err) {
-        console.error("Failed to attach to Messaging Service:", err);
+        console.error(
+          "Failed to attach to Messaging Service:",
+          err
+        );
       }
     } else {
-      console.warn("TWILIO_MESSAGING_SERVICE_SID is missing");
+      console.warn(
+        "TWILIO_MESSAGING_SERVICE_SID is missing"
+      );
     }
 
-    // 💾 save to Firestore
+    // 💾 SAVE TO FIRESTORE
     await userRef.update({
       twilioPhoneNumber: incoming.phoneNumber,
       twilioPhoneNumberSid: incoming.sid,
       twilioProvisionedAt: new Date().toISOString(),
+      twilioNumberType: "toll-free",
     });
 
     return res.json({
       success: true,
       number: incoming.phoneNumber,
+      type: "toll-free",
     });
 
   } catch (err) {
     console.error("Provisioning error:", err);
-    return res.status(500).json({ error: "Provision failed" });
+
+    return res.status(500).json({
+      error: err?.message || "Provision failed",
+    });
   }
 }
